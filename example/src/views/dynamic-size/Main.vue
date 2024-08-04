@@ -18,6 +18,9 @@
 
           :estimate-size="80"
           :item-class="'list-item-dynamic'"
+
+          :list="items" 
+          group="people"
         />
       </div>
 
@@ -68,7 +71,8 @@ export default {
   methods: {
     onTabChange (type) {
       this.isShowView = type === TAB_TYPE.VIEW
-    }
+    },
+
   }
 }
 </script>

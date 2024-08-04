@@ -53,7 +53,7 @@ if (process.env.NODE_ENV === 'development') {
   routes.push({
     path: '/dev',
     name: 'dev',
-    component: () => import(/* webpackChunkName: "dev" */ '../views/dev/Main.vue')
+    component: () => import(/* webpackChunkName: "dev" */ '../views/home/Main.vue')
   })
 }
 

@@ -6,5 +6,9 @@ module.exports = {
 
   outputDir: path.resolve(__dirname, '../docs'),
 
-  productionSourceMap: false
+  productionSourceMap: false,
+
+  configureWebpack: {
+    devtool: 'source-map'
+  }
 }

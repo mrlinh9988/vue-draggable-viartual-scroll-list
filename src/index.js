@@ -4,8 +4,120 @@
 
 import Vue from 'vue'
 import Virtual from './virtual'
-import { Item, Slot } from './item'
-import { VirtualProps } from './props'
+import { Item } from './item'
+import { VirtualProps, draggableProps } from './props'
+import Sortable from 'sortablejs'
+import { insertNodeAt, camelize, console, removeNode } from './util/helper'
+
+const draggableEvents = ['moved', 'added', 'removed']
+
+// Draggable
+
+function buildAttribute (object, propName, value) {
+  if (value === undefined) {
+    return object
+  }
+  object = object || {}
+  object[propName] = value
+  return object
+}
+
+function computeVmIndex (vnodes, element) {
+  return vnodes.map(elt => elt.elm || elt.$vnode.elm).indexOf(element)
+}
+
+function computeIndexes (slots, children, isTransition, footerOffset) {
+  if (!slots) {
+    return []
+  }
+
+  const elmFromNodes = slots.map(elt => elt.elm || elt.$vnode.elm)
+  const footerIndex = children.length - footerOffset
+  const rawIndexes = [...children].map((elt, idx) => idx >= footerIndex ? elmFromNodes.length : elmFromNodes.indexOf(elt)
+  )
+
+  return isTransition ? rawIndexes.filter(ind => ind !== -1) : rawIndexes
+}
+
+function emit (evtName, evtData) {
+  this.$nextTick(() => this.$emit(evtName.toLowerCase(), evtData))
+}
+
+function delegateAndEmit (evtName) {
+  return evtData => {
+    if (this.realList !== null) {
+      this['onDrag' + evtName](evtData)
+    }
+    emit.call(this, evtName, evtData)
+  }
+}
+
+function isTransitionName (name) {
+  return ['transition-group', 'TransitionGroup'].includes(name)
+}
+
+function isTransition (slots) {
+  if (!slots || slots.length !== 1) {
+    return false
+  }
+  const [{ componentOptions }] = slots
+  if (!componentOptions) {
+    return false
+  }
+  return isTransitionName(componentOptions.tag)
+}
+
+function getSlot (slot, scopedSlot, key) {
+  return slot[key] || (scopedSlot[key] ? scopedSlot[key]() : undefined)
+}
+
+function computeChildrenAndOffsets (children, slot, scopedSlot) {
+  let headerOffset = 0
+  let footerOffset = 0
+  const header = getSlot(slot, scopedSlot, 'header')
+  if (header) {
+    headerOffset = header.length
+    children = children ? [...header, ...children] : [...header]
+  }
+  const footer = getSlot(slot, scopedSlot, 'footer')
+  if (footer) {
+    footerOffset = footer.length
+    children = children ? [...children, ...footer] : [...footer]
+  }
+  return { children, headerOffset, footerOffset }
+}
+
+function getComponentAttributes ($attrs, componentData) {
+  let attributes = null
+  const update = (name, value) => {
+    attributes = buildAttribute(attributes, name, value)
+  }
+  const attrs = Object.keys($attrs)
+    .filter(key => key === 'id' || key.startsWith('data-'))
+    .reduce((res, key) => {
+      res[key] = $attrs[key]
+      return res
+    }, {})
+  update('attrs', attrs)
+
+  if (!componentData) {
+    return attributes
+  }
+  const { on, props, attrs: componentDataAttrs } = componentData
+  update('on', on)
+  update('props', props)
+  Object.assign(attributes.attrs, componentDataAttrs)
+  return attributes
+}
+
+const eventsListened = ['Start', 'Add', 'Remove', 'Update', 'End']
+const eventsToEmit = ['Choose', 'Unchoose', 'Sort', 'Filter', 'Clone']
+const readonlyProperties = ['Move', ...eventsListened, ...eventsToEmit].map(
+  evt => 'on' + evt
+)
+var draggingElement = null
+
+// End Draggable
 
 const EVENT_TYPE = {
   ITEM: 'item_resize',
@@ -17,11 +129,23 @@ const SLOT_TYPE = {
 }
 
 const VirtualList = Vue.component('virtual-list', {
-  props: VirtualProps,
+  inheritAttrs: false,
+
+  props: { ...VirtualProps, ...draggableProps },
 
   data () {
     return {
-      range: null
+      range: null,
+
+      // draggable
+      transitionMode: false,
+      noneFunctionalComponentMode: false,
+      visibleRange: {
+        start: 0
+      },
+      draggingIndex: null,
+      draggingRealIndex: null,
+      draggingVNode: null
     }
   },
 
@@ -42,6 +166,24 @@ const VirtualList = Vue.component('virtual-list', {
 
     offset (newValue) {
       this.scrollToOffset(newValue)
+    },
+
+    options: {
+      handler (newOptionValue) {
+        this.updateOptions(newOptionValue)
+      },
+      deep: true
+    },
+
+    $attrs: {
+      handler (newOptionValue) {
+        this.updateOptions(newOptionValue)
+      },
+      deep: true
+    },
+
+    realList () {
+      this.computeIndexes()
     }
   },
 
@@ -57,6 +199,35 @@ const VirtualList = Vue.component('virtual-list', {
     // listen slot size change
     if (this.$slots.header || this.$slots.footer) {
       this.$on(EVENT_TYPE.SLOT, this.onSlotResized)
+    }
+
+    // draggable
+    if (this.list !== null && this.value !== null) {
+      console.error(
+        'Value and list props are mutually exclusive! Please set one or another.'
+      )
+    }
+
+    if (this.element !== 'div') {
+      console.warn(
+        'Element props is deprecated please use tag props instead. See https://github.com/SortableJS/Vue.Draggable/blob/master/documentation/migrate.md#element-props'
+      )
+    }
+
+    if (this.options !== undefined) {
+      console.warn(
+        'Options props is deprecated, add sortable options directly as vue.draggable item, or use v-bind. See https://github.com/SortableJS/Vue.Draggable/blob/master/documentation/migrate.md#options-props'
+      )
+    }
+  },
+
+  computed: {
+    rootContainer () {
+      return this.$el.children[0]
+    },
+
+    realList () {
+      return this.list ? this.list : this.value
     }
   },
 
@@ -93,6 +264,38 @@ const VirtualList = Vue.component('virtual-list', {
         passive: false
       })
     }
+
+    // draggable
+    this.noneFunctionalComponentMode =
+      this.getTag().toLowerCase() !== this.$el.nodeName.toLowerCase() &&
+      !this.getIsFunctional()
+    if (this.noneFunctionalComponentMode && this.transitionMode) {
+      throw new Error(
+        `Transition-group inside component is not supported. Please alter tag value or remove transition-group. Current tag value: ${this.getTag()}`
+      )
+    }
+    const optionsAdded = {}
+    eventsListened.forEach(elt => {
+      optionsAdded['on' + elt] = delegateAndEmit.call(this, elt)
+    })
+
+    eventsToEmit.forEach(elt => {
+      optionsAdded['on' + elt] = emit.bind(this, elt)
+    })
+
+    const attributes = Object.keys(this.$attrs).reduce((res, key) => {
+      res[camelize(key)] = this.$attrs[key]
+      return res
+    }, {})
+
+    const options = Object.assign({}, this.options, attributes, optionsAdded, {
+      onMove: (evt, originalEvent) => {
+        return this.onDragMove(evt, originalEvent)
+      }
+    })
+    !('draggable' in options) && (options.draggable = '>*')
+    this._sortable = new Sortable(this.rootContainer, options)
+    this.computeIndexes()
   },
 
   beforeDestroy () {
@@ -100,6 +303,8 @@ const VirtualList = Vue.component('virtual-list', {
     if (this.pageMode) {
       document.removeEventListener('scroll', this.onScroll)
     }
+
+    if (this._sortable !== undefined) this._sortable.destroy()
   },
 
   methods: {
@@ -313,35 +518,313 @@ const VirtualList = Vue.component('virtual-list', {
         }
       }
       return slots
+    },
+
+    getIsFunctional () {
+      const { fnOptions } = this._vnode
+      return fnOptions && fnOptions.functional
+    },
+
+    getTag () {
+      return this.tag || this.element
+    },
+
+    updateOptions (newOptionValue) {
+      for (var property in newOptionValue) {
+        const value = camelize(property)
+        if (readonlyProperties.indexOf(value) === -1) {
+          this._sortable.option(value, newOptionValue[property])
+        }
+      }
+    },
+
+    getChildrenNodes () {
+      // if (this.noneFunctionalComponentMode) {
+      //   return this.$children[0].$slots.default
+      // }
+      // const rawNodes = this.$slots.default
+      // return this.transitionMode ? rawNodes[0].child.$slots.default : rawNodes
+      return this.$children
+    },
+
+    computeIndexes () {
+      this.$nextTick(() => {
+        this.visibleIndexes = computeIndexes(
+          this.getChildrenNodes(),
+          this.rootContainer.children,
+          this.transitionMode,
+          this.footerOffset
+        )
+      })
+    },
+
+    getUnderlyingVm (htmlElt) {
+      const index = computeVmIndex(this.getChildrenNodes() || [], htmlElt)
+      if (index === -1) {
+        // Edge case during move callback: related element might be
+        // an element different from collection
+        return null
+      }
+      const element = this.realList[index]
+      return { index, element }
+    },
+
+    getUnderlyingPotencialDraggableComponent ({ __vue__: vue }) {
+      if (
+        !vue ||
+        !vue.$options ||
+        !isTransitionName(vue.$options._componentTag)
+      ) {
+        if (
+          !('realList' in vue) &&
+          vue.$children.length === 1 &&
+          'realList' in vue.$children[0]
+        ) { return vue.$children[0] }
+
+        return vue
+      }
+      return vue.$parent
+    },
+
+    emitChanges (evt) {
+      this.$nextTick(() => {
+        this.$emit('change', evt)
+      })
+    },
+
+    alterList (onList) {
+      if (this.list) {
+        onList(this.list)
+        return
+      }
+      const newList = [...this.value]
+      onList(newList)
+      this.$emit('input', newList)
+    },
+
+    spliceList () {
+      const spliceList = list => list.splice(...arguments)
+      this.alterList(spliceList)
+    },
+
+    updatePosition (oldIndex, newIndex) {
+      const updatePosition = list =>
+        list.splice(newIndex, 0, list.splice(oldIndex, 1)[0])
+      this.alterList(updatePosition)
+    },
+
+    getRelatedContextFromMoveEvent ({ to, related }) {
+      const component = this.getUnderlyingPotencialDraggableComponent(to)
+      if (!component) {
+        return { component }
+      }
+      const list = component.realList
+      const context = { list, component }
+      if (to !== related && list && component.getUnderlyingVm) {
+        const destination = component.getUnderlyingVm(related)
+        if (destination) {
+          return Object.assign(destination, context)
+        }
+      }
+      return context
+    },
+
+    getVmIndex (domIndex) {
+      const indexes = this.visibleIndexes
+      const numberIndexes = indexes.length
+      return domIndex > numberIndexes - 1 ? numberIndexes : indexes[domIndex]
+    },
+
+    getComponent () {
+      return this.$slots.default[0].componentInstance
+    },
+
+    resetTransitionData (index) {
+      if (!this.noTransitionOnDrag || !this.transitionMode) {
+        return
+      }
+      var nodes = this.getChildrenNodes()
+      nodes[index].data = null
+      const transitionContainer = this.getComponent()
+      transitionContainer.children = []
+      transitionContainer.kept = undefined
+    },
+
+    onDragStart (evt, range, slots) {
+      this.context = this.getUnderlyingVm(evt.item)
+      evt.item._underlying_vm_ = this.clone(this.context.element)
+      draggingElement = evt.item
+
+      this.draggingIndex = evt.oldIndex
+      this.draggingRealIndex = range.start + evt.oldIndex
+      this.draggingVNode = slots[evt.oldIndex]
+      console.log(this.draggingIndex, this.draggingRealIndex, slots)
+    },
+
+    onDragAdd (evt) {
+      const element = evt.item._underlying_vm_
+      if (element === undefined) {
+        return
+      }
+      removeNode(evt.item)
+      const newIndex = this.getVmIndex(evt.newIndex)
+      this.spliceList(newIndex, 0, element)
+      this.computeIndexes()
+      const added = { element, newIndex }
+      this.emitChanges({ added })
+    },
+
+    onDragRemove (evt) {
+      insertNodeAt(this.rootContainer, evt.item, evt.oldIndex)
+      if (evt.pullMode === 'clone') {
+        removeNode(evt.clone)
+        return
+      }
+      const oldIndex = this.context.index
+      this.spliceList(oldIndex, 1)
+      const removed = { element: this.context.element, oldIndex }
+      this.resetTransitionData(oldIndex)
+      this.emitChanges({ removed })
+    },
+
+    onDragUpdate (evt) {
+      removeNode(evt.item)
+      insertNodeAt(evt.from, evt.item, evt.oldIndex)
+      const oldIndex = this.context.index
+      const newIndex = this.getVmIndex(evt.newIndex)
+
+      this.updatePosition(oldIndex, newIndex)
+      const moved = { element: this.context.element, oldIndex, newIndex }
+      this.emitChanges({ moved })
+    },
+
+    updateProperty (evt, propertyName) {
+      Object.prototype.hasOwnProperty.call(evt, propertyName) &&
+        (evt[propertyName] += this.headerOffset)
+    },
+
+    computeFutureIndex (relatedContext, evt) {
+      if (!relatedContext.element) {
+        return 0
+      }
+      const domChildren = [...evt.to.children].filter(
+        el => el.style.display !== 'none'
+      )
+      const currentDOMIndex = domChildren.indexOf(evt.related)
+      const currentIndex = relatedContext.component.getVmIndex(currentDOMIndex)
+      const draggedInList = domChildren.indexOf(draggingElement) !== -1
+      return draggedInList || !evt.willInsertAfter
+        ? currentIndex
+        : currentIndex + 1
+    },
+
+    onDragMove (evt, originalEvent) {
+      const onMove = this.move
+      if (!onMove || !this.realList) {
+        return true
+      }
+
+      const relatedContext = this.getRelatedContextFromMoveEvent(evt)
+      const draggedContext = this.context
+      const futureIndex = this.computeFutureIndex(relatedContext, evt)
+      Object.assign(draggedContext, { futureIndex })
+      const sendEvt = Object.assign({}, evt, {
+        relatedContext,
+        draggedContext
+      })
+      return onMove(sendEvt, originalEvent)
+    },
+
+    onDragEnd () {
+      this.computeIndexes()
+      draggingElement = null
+
+      this.draggingVNode = null
+    },
+
+    findRealItem (item) {
+      const idx = this.dataSources.findIndex(
+        (x) => x[this.dataKey] === item[this.dataKey])
+      return this.dataSources[this.visibleRange.start + idx]
+    },
+
+    updatedSources (
+      instruction,
+      draggingRealIndex) {
+      const newList = [...this.dataSources]
+
+      if ('moved' in instruction) {
+        const { newIndex } = instruction.moved
+        const start = this.visibleRange.start + newIndex
+        const deleteCount = 0
+        const item = newList.splice(draggingRealIndex, 1)[0]
+        console.log(`Move by splicing start: ${start},` +
+                     ` deleteCount: ${deleteCount}, item:`, item)
+        newList.splice(start, deleteCount, item)
+      } else if ('added' in instruction) {
+        const { newIndex, element } = instruction.added
+        const start = this.visibleRange.start + newIndex
+        const deleteCount = 0
+        const item = element
+        console.log(`Add by splicing start: ${start},` +
+                     ` deleteCount: ${deleteCount}, item:`, item)
+        newList.splice(start, deleteCount, item)
+      } else if ('removed' in instruction) {
+        const { oldIndex } = instruction.removed
+        const start = this.visibleRange.start + oldIndex
+        const deleteCount = 1
+        console.log(`Remove by splicing start: ${start},` +
+                     ` deleteCount: ${deleteCount}`)
+        newList.splice(start, deleteCount)
+      }
+
+      return newList
     }
   },
 
   // render function, a closer-to-the-compiler alternative to templates
   // https://vuejs.org/v2/guide/render-function.html#The-Data-Object-In-Depth
   render (h) {
-    const { header, footer } = this.$slots
     const { padFront, padBehind } = this.range
-    const { isHorizontal, pageMode, rootTag, wrapTag, wrapClass, wrapStyle, headerTag, headerClass, headerStyle, footerTag, footerClass, footerStyle } = this
+    const { isHorizontal, pageMode, rootTag, wrapTag, wrapClass, wrapStyle } = this
     const paddingStyle = { padding: isHorizontal ? `0px ${padBehind}px 0px ${padFront}px` : `${padFront}px 0px ${padBehind}px` }
     const wrapperStyle = wrapStyle ? Object.assign({}, wrapStyle, paddingStyle) : paddingStyle
+
+    // draggable
+    const slots = this.$slots.default
+    this.transitionMode = isTransition(slots)
+    const { headerOffset, footerOffset } = computeChildrenAndOffsets(
+      slots,
+      this.$slots,
+      this.$scopedSlots
+    )
+    this.headerOffset = headerOffset
+    this.footerOffset = footerOffset
+    const attributes = getComponentAttributes(this.$attrs, this.componentData)
 
     return h(rootTag, {
       ref: 'root',
       on: {
-        '&scroll': !pageMode && this.onScroll
-      }
-    }, [
-      // header slot
-      header ? h(Slot, {
-        class: headerClass,
-        style: headerStyle,
-        props: {
-          tag: headerTag,
-          event: EVENT_TYPE.SLOT,
-          uniqueKey: SLOT_TYPE.HEADER
-        }
-      }, header) : null,
+        '&scroll': !pageMode && this.onScroll,
+        input: this.$emit.bind(this, 'input'),
+        start: (e) => {
+          this.onDragStart(e, this.range, this.getRenderSlots(h))
+          this.$emit('start', e)
+        },
 
+        end: (e) => {
+          this.onDragEnd()
+          this.$emit('end', e)
+        },
+        change: (e) => {
+          if (draggableEvents.some(n => n in e)) {
+            // this.$emit('input', draggablePolicy.updatedSources(
+            //   e, this.vlsPolicy.draggingRealIndex));
+          }
+        }
+      },
+      ...attributes
+    }, [
       // main list
       h(wrapTag, {
         class: wrapClass,
@@ -350,17 +833,6 @@ const VirtualList = Vue.component('virtual-list', {
         },
         style: wrapperStyle
       }, this.getRenderSlots(h)),
-
-      // footer slot
-      footer ? h(Slot, {
-        class: footerClass,
-        style: footerStyle,
-        props: {
-          tag: footerTag,
-          event: EVENT_TYPE.SLOT,
-          uniqueKey: SLOT_TYPE.FOOTER
-        }
-      }, footer) : null,
 
       // an empty element use to scroll to bottom
       h('div', {
